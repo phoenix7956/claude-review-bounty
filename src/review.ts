@@ -11,7 +11,7 @@ export interface ReviewOutput {
 export function analyzePR(pr: PRInfo): ReviewOutput {
   // ── Risk patterns (25+, 5 categories) ────────────────────────────────────
 
-  // 🔒 Security (10 patterns)
+  // 🔒 Security (14 patterns — incl. SQL injection & destructive ops)
   const securityPatterns: [RegExp, string][] = [
     [/password\s*=\s*["'][^"']+["']/i, "⚠️ Security: Hardcoded password detected"],
     [/secret\s*=\s*["'][^"']+["']/i, "⚠️ Security: Hardcoded secret detected"],
@@ -23,6 +23,13 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
     [/innerHTML\s*=/i, "⚠️ Security: innerHTML assignment — XSS risk"],
     [/localStorage\.setItem\s*\(\s*["']token["']/i, "⚠️ Security: Token stored in localStorage"],
     [/process\.env\.\w+\s*\?\?\s*["'][^"']+["']/i, "⚠️ Security: Env fallback to hardcoded value"],
+    // SQL injection & destructive DB ops (added in v1.1.0)
+    [/\bDROP\s+(TABLE|DATABASE|INDEX|SCHEMA|VIEW|TRIGGER|PROCEDURE|FUNCTION|USER|ROLE)\b/i, "⚠️ Security: Destructive SQL DROP statement"],
+    [/\bTRUNCATE\s+(TABLE)?\b/i, "⚠️ Security: Destructive SQL TRUNCATE statement"],
+    [/\bWHERE\s+1\s*=\s*1\b/i, "⚠️ Security: SQL 'WHERE 1=1' pattern (often injection indicator)"],
+    [/\bUNION\s+(ALL\s+)?SELECT\b/i, "⚠️ Security: SQL UNION SELECT — classic injection payload"],
+    [/\b(OR|AND)\s+['"]?\w+['"]?\s*=\s*['"]?\w+['"]?/i, "⚠️ Security: SQL tautology pattern (e.g. OR 1=1) — possible injection"],
+    [/--\s*$/m, "⚠️ Security: SQL comment marker (-- ) — possible injection attempt"],
   ];
 
   // 📐 Code Quality (8 patterns)
@@ -71,43 +78,51 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
     ...testPatterns,
   ];
 
+  const diff = pr.diff ?? "";
+  const body = pr.body ?? "";
+  const filesChanged = pr.filesChanged ?? [];
+  const additions = pr.additions ?? 0;
+  const deletions = pr.deletions ?? 0;
+
   const risks: string[] = [];
   for (const [pattern, message] of allPatterns) {
-    if (pattern.test(pr.diff)) {
+    if (pattern.test(diff)) {
       risks.push(message);
     }
   }
 
   // Estimate complexity
-  const totalChanges = pr.additions + pr.deletions;
+  const totalChanges = additions + deletions;
   const complexity = totalChanges > 500 ? "large" : totalChanges > 100 ? "medium" : "small";
 
   // Confidence based on diff size
   let confidence: "Low" | "Medium" | "High" = "Medium";
-  if (pr.diff.length < 2000) confidence = "High";
-  else if (pr.diff.length > 50000) confidence = "Low";
+  if (diff.length < 2000) confidence = "High";
+  else if (diff.length > 50000) confidence = "Low";
 
   // Suggestions
   const suggestions: string[] = [];
-  if (pr.body.length < 20) suggestions.push("PR description is very brief — add more context");
-  if (pr.additions > 300) suggestions.push("Large PR — consider splitting into smaller changes");
+  if (body.length < 20) suggestions.push("PR description is very brief — add more context");
+  if (additions > 300) suggestions.push("Large PR — consider splitting into smaller changes");
   if (risks.some(r => r.includes("Security"))) suggestions.push("Security issues detected — review carefully before merging");
-  if (!pr.diff.includes("test")) suggestions.push("No test changes detected — consider adding tests");
-  if (pr.diff.includes("main") && !pr.diff.includes("master")) suggestions.push("Direct main branch modification — use feature branches");
+  if (!diff.includes("test")) suggestions.push("No test changes detected — consider adding tests");
+  if (diff.includes("main") && !diff.includes("master")) suggestions.push("Direct main branch modification — use feature branches");
   if (!risks.some(r => r.includes("Test:"))) suggestions.push("No test coverage detected — consider adding tests");
   if (suggestions.length === 0) suggestions.push("Code looks reasonable — standard review practices apply.");
 
   return {
-    summary: `${pr.title} modifies ${pr.filesChanged.length} file(s) with ${pr.additions} additions and ${pr.deletions} deletions. This is a ${complexity} change.`,
+    summary: `${pr.title} modifies ${filesChanged.length} file(s) with ${additions} additions and ${deletions} deletions. This is a ${complexity} change.`,
     risks: risks.length > 0 ? risks : ["No obvious security risks detected in the diff."],
     suggestions,
     confidence,
-    filesAnalyzed: pr.filesChanged.length,
+    filesAnalyzed: filesChanged.length,
   };
 }
 
 export function formatMarkdown(pr: PRInfo, review: ReviewOutput): string {
-  return `## 📋 PR Review: ${pr.title}
+  // Escape pipe characters in title to avoid breaking Markdown table rendering
+  const safeTitle = pr.title.replace(/\|/g, "\\|");
+  return `## 📋 PR Review: ${safeTitle}
 
 ### Summary
 ${review.summary}

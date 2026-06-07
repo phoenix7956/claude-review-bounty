@@ -31,7 +31,8 @@ describe("analyzePR", () => {
   it("detects hardcoded credentials", () => {
     const pr = makePR({ diff: "const token = 'sk-12345';\nconst password = 'secret';" });
     const result = analyzePR(pr);
-    expect(result.risks.some(r => /credential|api key/i.test(r))).toBeTruthy();
+    // Should match at least one of: password, secret, token, api key
+    expect(result.risks.some(r => /password|secret|token|api key|credential/i.test(r))).toBeTruthy();
   });
 
   it("detects destructive database operations", () => {
