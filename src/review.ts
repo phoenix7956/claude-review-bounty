@@ -18,7 +18,8 @@ interface ClaudeResponse {
 async function callClaude(
   pr: PRInfo,
   apiKey: string,
-  model = "claude-sonnet-4-20250514"
+  model = "claude-sonnet-4-20250514",
+  baseUrl = process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com"
 ): Promise<ReviewOutput> {
   const prompt = `You are a senior code reviewer. Analyze the following GitHub PR and produce a STRICT JSON review.
 
@@ -47,7 +48,7 @@ Rules:
 - suggestions: actionable improvements. Empty array if none.
 - confidence: Low if diff is huge (>10k chars) or unclear intent, Medium if normal, High if small and well-scoped.`;
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -183,13 +184,13 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
 
 export async function reviewPR(
   pr: PRInfo,
-  opts: { apiKey?: string; model?: string; useHeuristic?: boolean } = {}
+  opts: { apiKey?: string; model?: string; useHeuristic?: boolean; baseUrl?: string } = {}
 ): Promise<ReviewOutput> {
   if (opts.useHeuristic || !opts.apiKey) {
     return analyzePR(pr);
   }
   try {
-    return await callClaude(pr, opts.apiKey, opts.model);
+    return await callClaude(pr, opts.apiKey, opts.model, opts.baseUrl);
   } catch (err) {
     console.error(`[claude-review] Claude call failed, falling back to heuristic: ${err instanceof Error ? err.message : err}`);
     return analyzePR(pr);

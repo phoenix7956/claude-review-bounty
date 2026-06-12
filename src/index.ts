@@ -11,6 +11,7 @@ async function main() {
   let shouldPost = false;
   let useHeuristic = false;
   let model = "claude-sonnet-4-20250514";
+  let baseUrl = process.env.ANTHROPIC_BASE_URL;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg.startsWith("--pr=")) prUrl = arg.slice(5);
@@ -19,6 +20,7 @@ async function main() {
     else if (arg === "--post") shouldPost = true;
     else if (arg === "--heuristic") useHeuristic = true;
     else if (arg.startsWith("--model=")) model = arg.slice(8);
+    else if (arg.startsWith("--base-url=")) baseUrl = arg.slice(11);
   }
 
   if (!prUrl) {
@@ -28,10 +30,12 @@ async function main() {
     console.error("  --post            Post the review as a PR comment");
     console.error("  --heuristic       Skip Claude API, use heuristic analysis only");
     console.error("  --model=<id>      Claude model (default: claude-sonnet-4-20250514)");
+  console.error("  --base-url=<url>  Custom API base (or env ANTHROPIC_BASE_URL)");
     console.error("");
     console.error("Env:");
     console.error("  GITHUB_TOKEN          Required for --post or for private PRs");
     console.error("  ANTHROPIC_API_KEY     Required unless --heuristic is set");
+  console.error("  ANTHROPIC_BASE_URL     Optional custom endpoint (e.g. LM Studio http://localhost:1234)");
     console.error("");
     console.error("Examples:");
     console.error("  claude-review --pr=https://github.com/owner/repo/pull/123");
@@ -49,7 +53,7 @@ async function main() {
 
     const mode = useHeuristic || !anthropicKey ? "heuristic" : `Claude (${model})`;
     console.error(`Analyzing with ${mode}...`);
-    const review = await reviewPR(pr, { apiKey: anthropicKey, model, useHeuristic });
+    const review = await reviewPR(pr, { apiKey: anthropicKey, model, useHeuristic, baseUrl });
 
     const md = formatMarkdown(pr, review);
     console.log(md);
