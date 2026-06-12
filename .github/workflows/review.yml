@@ -1,12 +1,19 @@
-name: PR Review
+name: Claude PR Review
+description: Auto-review pull requests using Claude API
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       pr_url:
         description: "PR URL"
         required: true
         type: string
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   review:
@@ -21,12 +28,20 @@ jobs:
           cache: "npm"
 
       - name: Install claude-review
-        run: npm install -g claude-review
+        run: npm install -g github:phoenix7956/claude-review#bounty-4-pr-review-agent
 
-      - name: Run review
+      - name: Run review (heuristic fallback if no Claude key)
         env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          REVIEW_OUTPUT=\$(claude-review "\${{ inputs.pr_url }}")
-          echo "## 🤖 Claude PR Review" >> $GITHUB_STEP_SUMMARY
-          echo "$REVIEW_OUTPUT" >> $GITHUB_STEP_SUMMARY
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          if [ -z "$PR_URL" ]; then
+            PR_URL="${{ inputs.pr_url }}"
+          fi
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            claude-review --pr="$PR_URL" --model=claude-sonnet-4-20250514
+          else
+            echo "::notice::ANTHROPIC_API_KEY not set, using heuristic mode"
+            claude-review --pr="$PR_URL" --heuristic
+          fi

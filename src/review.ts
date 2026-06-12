@@ -6,6 +6,86 @@ export interface ReviewOutput {
   suggestions: string[];
   confidence: "Low" | "Medium" | "High";
   filesAnalyzed: number;
+  model?: string;
+}
+
+interface ClaudeResponse {
+  content: { type: string; text: string }[];
+  stop_reason: string;
+  model: string;
+}
+
+async function callClaude(
+  pr: PRInfo,
+  apiKey: string,
+  model = "claude-sonnet-4-20250514"
+): Promise<ReviewOutput> {
+  const prompt = `You are a senior code reviewer. Analyze the following GitHub PR and produce a STRICT JSON review.
+
+PR title: ${pr.title}
+PR description: ${pr.body}
+Files changed: ${pr.filesChanged.length}
+Additions: ${pr.additions}, Deletions: ${pr.deletions}
+
+Diff (truncated to 12000 chars):
+\`\`\`diff
+${pr.diff.slice(0, 12000)}
+\`\`\`
+
+Return ONLY valid JSON in this exact shape (no prose, no markdown fence):
+{
+  "summary": "<2-3 sentence overview of the change>",
+  "risks": ["<risk 1>", "<risk 2>"],
+  "suggestions": ["<suggestion 1>", "<suggestion 2>"],
+  "confidence": "Low" | "Medium" | "High",
+  "filesAnalyzed": ${pr.filesChanged.length}
+}
+
+Rules:
+- summary <= 280 chars.
+- risks: real, specific issues. Empty array if none.
+- suggestions: actionable improvements. Empty array if none.
+- confidence: Low if diff is huge (>10k chars) or unclear intent, Medium if normal, High if small and well-scoped.`;
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Claude API ${resp.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = (await resp.json()) as ClaudeResponse;
+  const text = data.content.find((b) => b.type === "text")?.text ?? "";
+
+  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return analyzePR(pr);
+  }
+
+  return {
+    summary: String(parsed.summary ?? "").slice(0, 280),
+    risks: Array.isArray(parsed.risks) ? parsed.risks.map(String) : [],
+    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.map(String) : [],
+    confidence: ["Low", "Medium", "High"].includes(parsed.confidence) ? parsed.confidence : "Medium",
+    filesAnalyzed: pr.filesChanged.length,
+    model: data.model ?? model,
+  };
 }
 
 export function analyzePR(pr: PRInfo): ReviewOutput {
@@ -23,7 +103,6 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
     [/innerHTML\s*=/i, "⚠️ Security: innerHTML assignment — XSS risk"],
     [/localStorage\.setItem\s*\(\s*["']token["']/i, "⚠️ Security: Token stored in localStorage"],
     [/process\.env\.\w+\s*\?\?\s*["'][^"']+["']/i, "⚠️ Security: Env fallback to hardcoded value"],
-    // SQL injection & destructive DB ops (added in v1.1.0)
     [/\bDROP\s+(TABLE|DATABASE|INDEX|SCHEMA|VIEW|TRIGGER|PROCEDURE|FUNCTION|USER|ROLE)\b/i, "⚠️ Security: Destructive SQL DROP statement"],
     [/\bTRUNCATE\s+(TABLE)?\b/i, "⚠️ Security: Destructive SQL TRUNCATE statement"],
     [/\bWHERE\s+1\s*=\s*1\b/i, "⚠️ Security: SQL 'WHERE 1=1' pattern (often injection indicator)"],
@@ -48,42 +127,24 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
   const perfPatterns: [RegExp, string][] = [
     [/for\s*\(\s*\w+\s+in\s+\w+\s*\)/i, "⚡ Performance: for...in loop (use Object.keys/values instead)"],
     [/\.forEach\s*\(/i, "⚡ Performance: forEach — consider for...of or .map()"],
-    [/\.slice\(\s*0\s*\)/i, "⚡ Performance: unnecessary .slice(0) — use spread/rest instead"],
-    [/new Date\s*\(\s*["']\d{4}-\d{2}-\d{2}/i, "⚡ Performance: Date constructor from string (use Date.parse)"],
   ];
 
-  // 🐛 Potential Bugs (4 patterns)
+  // 🐛 Bug patterns (3)
   const bugPatterns: [RegExp, string][] = [
-    [/if\s*\(\s*true\s*\)|if\s*\(\s*1\s*\)/i, "🐛 Bug: Always-true conditional"],
-    [/catch\s*\(\s*\)\s*\{/i, "🐛 Bug: Empty catch block — errors silently swallowed"],
-    [/&&\s*true|\|\|\s*false/i, "🐛 Bug: Redundant boolean operation"],
-    [/\.env.*password|config.*password/i, "🐛 Bug: Password in config/env file"],
+    [/catch\s*\(\s*\w*\s*\)\s*\{\s*\}/i, "🐛 Bug: Empty catch block — errors silently swallowed"],
+    [/\bnull\s*\.\w+/i, "🐛 Bug: Potential null reference access"],
+    [/==\s*null|==\s*undefined/i, "🐛 Bug: Loose equality with null/undefined"],
   ];
 
-  // ✅ Test Detection (5 patterns)
+  // 🧪 Test patterns
   const testPatterns: [RegExp, string][] = [
-    [/\bit\s*\(/i, "✅ Test: Jest/Mocha 'it()' test detected"],
-    [/describe\s*\(/i, "✅ Test: Jest/Mocha 'describe()' block detected"],
-    [/@pytest\.fixture/i, "✅ Test: pytest fixture detected"],
-    [/def test_/i, "✅ Test: Python test function detected"],
-    [/func Test\w+\(/i, "✅ Test: Go test function detected"],
+    [/skip\s*\(/i, "🧪 Test: .skip() used — test disabled"],
+    [/xit\s*\(/i, "🧪 Test: xit() used — test disabled"],
   ];
 
-  // Aggregate all patterns
-  const allPatterns = [
-    ...securityPatterns,
-    ...qualityPatterns,
-    ...perfPatterns,
-    ...bugPatterns,
-    ...testPatterns,
-  ];
+  const allPatterns = [...securityPatterns, ...qualityPatterns, ...perfPatterns, ...bugPatterns, ...testPatterns];
 
-  const diff = pr.diff ?? "";
-  const body = pr.body ?? "";
-  const filesChanged = pr.filesChanged ?? [];
-  const additions = pr.additions ?? 0;
-  const deletions = pr.deletions ?? 0;
-
+  const { diff, additions, deletions, filesChanged, body } = pr;
   const risks: string[] = [];
   for (const [pattern, message] of allPatterns) {
     if (pattern.test(diff)) {
@@ -116,11 +177,26 @@ export function analyzePR(pr: PRInfo): ReviewOutput {
     suggestions,
     confidence,
     filesAnalyzed: filesChanged.length,
+    model: "heuristic",
   };
 }
 
+export async function reviewPR(
+  pr: PRInfo,
+  opts: { apiKey?: string; model?: string; useHeuristic?: boolean } = {}
+): Promise<ReviewOutput> {
+  if (opts.useHeuristic || !opts.apiKey) {
+    return analyzePR(pr);
+  }
+  try {
+    return await callClaude(pr, opts.apiKey, opts.model);
+  } catch (err) {
+    console.error(`[claude-review] Claude call failed, falling back to heuristic: ${err instanceof Error ? err.message : err}`);
+    return analyzePR(pr);
+  }
+}
+
 export function formatMarkdown(pr: PRInfo, review: ReviewOutput): string {
-  // Escape pipe characters in title to avoid breaking Markdown table rendering
   const safeTitle = pr.title.replace(/\|/g, "\\|");
   return `## 📋 PR Review: ${safeTitle}
 
@@ -136,6 +212,5 @@ ${review.suggestions.map((s) => `- ${s}`).join("\n")}
 ### ✅ Confidence Score: **${review.confidence}**
 
 ---
-*Analyzed ${review.filesAnalyzed} file(s) | ${pr.additions} additions / ${pr.deletions} deletions*
-*Review generated by claude-review CLI*`;
+*Analyzed ${review.filesAnalyzed} file(s) | ${pr.additions} additions / ${pr.deletions} deletions | model: ${review.model ?? "heuristic"}*`;
 }
